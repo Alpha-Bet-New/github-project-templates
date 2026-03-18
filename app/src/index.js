@@ -336,6 +336,48 @@ async function updateConsensus(token, projectId, itemId, fields) {
       { projectId, itemId, fieldId: consensusField.id, optionId: option.id }
     );
     console.log(`Consensus → ${consensus}`);
+
+    // Auto-promote Status: Proposed → Todo when consensus is Yes
+    if (consensus === "Yes") {
+      const statusField = fields.find((f) => f.name === "Status" && f.options);
+      if (statusField) {
+        // Check current status
+        const statusData = await graphql(
+          token,
+          `query($itemId: ID!) {
+            node(id: $itemId) {
+              ... on ProjectV2Item {
+                fieldValueByName(name: "Status") {
+                  ... on ProjectV2ItemFieldSingleSelectValue { name }
+                }
+              }
+            }
+          }`,
+          { itemId }
+        );
+        const currentStatus = statusData.node?.fieldValueByName?.name;
+        if (currentStatus === "Proposed") {
+          const todoOption = statusField.options.find((o) => o.name === "Todo");
+          if (todoOption) {
+            await graphql(
+              token,
+              `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { singleSelectOptionId: $optionId }
+                }) {
+                  projectV2Item { id }
+                }
+              }`,
+              { projectId, itemId, fieldId: statusField.id, optionId: todoOption.id }
+            );
+            console.log(`Status: Proposed → Todo (consensus reached)`);
+          }
+        }
+      }
+    }
   } else {
     // Clear consensus (not all reviewed yet, no disagree)
     await graphql(
