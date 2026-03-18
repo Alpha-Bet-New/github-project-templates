@@ -342,8 +342,8 @@ async function createFields(token, projectId, template) {
       if (field.options) {
         const optionsGql = field.options
           .map((o) => {
-            const desc = o.description ? `, description: "${escGql(o.description)}"` : "";
-            return `{ name: "${escGql(o.name)}", color: ${o.color}${desc} }`;
+            const desc = o.description || "";
+            return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
           })
           .join(", ");
 
@@ -371,8 +371,8 @@ async function createFields(token, projectId, template) {
     } else if (field.type === "SINGLE_SELECT") {
       const optionsGql = field.options
         .map((o) => {
-          const desc = o.description ? `, description: "${escGql(o.description)}"` : "";
-          return `{ name: "${escGql(o.name)}", color: ${o.color}${desc} }`;
+          const desc = o.description || "";
+          return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
         })
         .join(", ");
 
