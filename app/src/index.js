@@ -271,9 +271,86 @@ async function handleIssueComment(payload, env) {
       );
 
       console.log(`Set ${reviewerField} → ${verdict} on item ${itemId}`);
+
+      // Compute consensus
+      await updateConsensus(token, projectId, itemId, fields);
     }
   } catch (err) {
     console.error(`Failed to process review comment on ${repo.full_name}#${issue.number}:`, err);
+  }
+}
+
+async function updateConsensus(token, projectId, itemId, fields) {
+  // Read all 3 reviewer fields for this item
+  const reviewerNames = ["Claude Reviewer", "Gemini Reviewer", "Codex Reviewer"];
+  const itemData = await graphql(
+    token,
+    `query($itemId: ID!) {
+      node(id: $itemId) {
+        ... on ProjectV2Item {
+          claudeReview: fieldValueByName(name: "Claude Reviewer") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          geminiReview: fieldValueByName(name: "Gemini Reviewer") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          codexReview: fieldValueByName(name: "Codex Reviewer") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+        }
+      }
+    }`,
+    { itemId }
+  );
+
+  const reviews = [
+    itemData.node?.claudeReview?.name || null,
+    itemData.node?.geminiReview?.name || null,
+    itemData.node?.codexReview?.name || null,
+  ];
+
+  const hasDisagree = reviews.some((r) => r === "Disagree");
+  const allReviewed = reviews.filter((r) => r !== null).length === 3;
+
+  let consensus = null; // null = leave blank / clear
+  if (hasDisagree) {
+    consensus = "No";
+  } else if (allReviewed) {
+    consensus = "Yes";
+  }
+
+  // Find the Consensus field
+  const consensusField = fields.find((f) => f.name === "Consensus" && f.options);
+  if (!consensusField) return;
+
+  if (consensus) {
+    const option = consensusField.options.find((o) => o.name === consensus);
+    if (!option) return;
+
+    await graphql(
+      token,
+      `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: $projectId
+          itemId: $itemId
+          fieldId: $fieldId
+          value: { singleSelectOptionId: $optionId }
+        }) {
+          projectV2Item { id }
+        }
+      }`,
+      { projectId, itemId, fieldId: consensusField.id, optionId: option.id }
+    );
+    console.log(`Consensus → ${consensus}`);
+  } else {
+    // Clear consensus (not all reviewed yet, no disagree)
+    await graphql(
+      token,
+      `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+        clearProjectV2ItemFieldValue(input: {
+          projectId: $projectId
+          itemId: $itemId
+          fieldId: $fieldId
+        }) {
+          projectV2Item { id }
+        }
+      }`,
+      { projectId, itemId, fieldId: consensusField.id }
+    );
   }
 }
 

@@ -149,6 +149,23 @@
           "description": "Does not agree."
         }
       ]
+    },
+    {
+      "name": "Consensus",
+      "type": "SINGLE_SELECT",
+      "description": "Auto-computed. Yes if all 3 reviewers agree (or mostly agree). No if any reviewer disagrees. Blank until enough reviews are in.",
+      "options": [
+        {
+          "name": "Yes",
+          "color": "GREEN",
+          "description": "All reviewers agree the issue is valid."
+        },
+        {
+          "name": "No",
+          "color": "RED",
+          "description": "At least one reviewer disagrees."
+        }
+      ]
     }
   ],
   "rules": {
