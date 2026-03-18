@@ -1,16 +1,24 @@
 # GitHub Project Templates
 
-Reusable GitHub Projects V2 templates for the Alpha-Bet-New org. Define project field schemas once, apply them to any project with a single command.
+Reusable GitHub Projects V2 templates for the Alpha-Bet-New org. Define project field schemas once, apply them automatically or manually to any project.
 
-## Quick Start
+## Automatic Setup (GitHub App)
+
+A GitHub App (`project-setup-bot`) auto-creates a project whenever a new repo is created in the org. It names the project after the repo, links them, creates all fields from the template, and pushes config files to the repo.
+
+See [`app/README.md`](app/README.md) for setup instructions.
+
+## Manual Setup
 
 ```bash
-# Apply the ai-review template to a project
+# Apply the ai-review template to an existing project
 ./scripts/setup-project.sh <PROJECT_ID> ai-review
 
 # Save the generated IDs to the target repo
 ./scripts/setup-project.sh <PROJECT_ID> ai-review --output /path/to/repo/.github/project-fields.json
 ```
+
+Or use the GitHub Actions workflow: go to the [Actions tab](.github/workflows/setup-project.yml) → "Setup Project" → "Run workflow".
 
 ## Available Templates
 
