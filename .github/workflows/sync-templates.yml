@@ -1,0 +1,44 @@
+name: Sync Template Projects
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'templates/**/fields.json'
+      - 'config.json'
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Template to sync'
+        required: true
+        type: choice
+        options:
+          - ai-review
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Sync template projects
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_ADMIN_TOKEN }}
+        run: |
+          TEMPLATE="${{ inputs.template || 'ai-review' }}"
+          ./scripts/sync-templates.sh "$TEMPLATE"
+
+      - name: Summary
+        run: |
+          echo "## Template Sync Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Synced **${{ inputs.template || 'ai-review' }}** template to all org template projects:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          jq -r '.template_projects | to_entries[] | "- **\(.key)**: `\(.value)`"' config.json >> $GITHUB_STEP_SUMMARY
