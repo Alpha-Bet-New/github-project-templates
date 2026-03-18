@@ -11,5 +11,6 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 DEFAULT_TEMPLATE = "ai-review"
 TEMPLATES_REPO = "Alpha-Bet-New/github-project-templates"
-TEMPLATE_PROJECT_ID = "PVT_kwDOCx99fM4BSGlz"      # FV2.0 — source template project to copy
-TEMPLATE_PROJECT_ORG = "Alpha-Bet-New"              # Org that owns the template project
+# Per-org template project IDs (JSON map: org login → project node ID)
+# Each org needs its own template project since copyProjectV2 requires same-org access
+TEMPLATE_PROJECTS = '{"Alpha-Bet-New":"PVT_kwDOCx99fM4BSGlz","AI-Agents-Misc":"PVT_kwDODtX-dc4BSKRi"}'

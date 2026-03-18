@@ -7,14 +7,22 @@
  *   2. Links the project to the repo
  *   3. Pushes project-fields.json + docs to the repo's .github/ directory
  *
+ * On projects_v2.created (manual project creation):
+ *   Applies template fields to the new project (skips if already set up)
+ *
+ * On projects_v2_item.created (item added to project):
+ *   Sets default Status to "Proposed" (per template rules) if no status is set
+ *
+ * On push to templates repo (fields.json changed):
+ *   Syncs all template projects across orgs to match the updated fields.json
+ *
  * Environment variables (set as Cloudflare Worker secrets):
  *   APP_ID              — GitHub App ID
  *   PRIVATE_KEY         — GitHub App private key (PEM format)
  *   WEBHOOK_SECRET      — Webhook secret for signature verification
  *   DEFAULT_TEMPLATE    — Template name (default: "ai-review")
  *   TEMPLATES_REPO      — Owner/repo for templates (default: "Alpha-Bet-New/github-project-templates")
- *   TEMPLATE_PROJECT_ID — Node ID of the template project to copy from
- *   TEMPLATE_PROJECT_ORG — Org that owns the template project (copy only works same-org)
+ *   TEMPLATE_PROJECTS    — JSON map of org login → template project node ID (e.g. '{"Org1":"PVT_...","Org2":"PVT_..."}')
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -44,20 +52,38 @@ export default {
     const event = request.headers.get("x-github-event");
     const payload = JSON.parse(body);
 
-    // Only handle repository creation
-    if (event !== "repository" || payload.action !== "created") {
-      return new Response("Ignored", { status: 200 });
+    const templatesRepo = (env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates").toLowerCase();
+
+    if (event === "repository" && payload.action === "created" && !payload.repository.fork) {
+      // New repo → set up project
+      ctx.waitUntil(handleRepoCreated(payload, env));
+      return new Response("Accepted", { status: 202 });
     }
 
-    // Skip forks
-    if (payload.repository.fork) {
-      return new Response("Skipping fork", { status: 200 });
+    if (event === "projects_v2" && payload.action === "created") {
+      // Manually created project → apply template fields
+      ctx.waitUntil(handleProjectCreated(payload, env));
+      return new Response("Accepted", { status: 202 });
     }
 
-    // Respond immediately, process asynchronously
-    ctx.waitUntil(handleRepoCreated(payload, env));
+    if (event === "projects_v2_item" && payload.action === "created") {
+      // Item added to project → apply default field values
+      ctx.waitUntil(handleItemAdded(payload, env));
+      return new Response("Accepted", { status: 202 });
+    }
 
-    return new Response("Accepted", { status: 202 });
+    if (event === "push" && payload.repository.full_name.toLowerCase() === templatesRepo && payload.ref === "refs/heads/main") {
+      // Push to templates repo main branch — check if fields.json changed
+      const changed = (payload.commits || []).some((c) =>
+        [...(c.added || []), ...(c.modified || [])].some((f) => f.match(/^templates\/.*\/fields\.json$/))
+      );
+      if (changed) {
+        ctx.waitUntil(handleTemplateSyncPush(payload, env));
+        return new Response("Syncing templates", { status: 202 });
+      }
+    }
+
+    return new Response("Ignored", { status: 200 });
   },
 };
 
@@ -68,8 +94,9 @@ async function handleRepoCreated(payload, env) {
   const org = payload.organization;
   const templateName = env.DEFAULT_TEMPLATE || "ai-review";
   const templatesRepo = env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates";
-  const templateProjectId = env.TEMPLATE_PROJECT_ID || "";
-  const templateProjectOrg = env.TEMPLATE_PROJECT_ORG || "";
+  // Per-org template project map: { "OrgLogin": "PVT_..." }
+  const templateProjects = JSON.parse(env.TEMPLATE_PROJECTS || "{}");
+  const templateProjectId = templateProjects[org.login] || "";
 
   console.log(`New repo: ${repo.full_name} — setting up project...`);
 
@@ -83,10 +110,8 @@ async function handleRepoCreated(payload, env) {
     let projectId;
     let generatedFields;
 
-    // 2. Try to copy from template project (same org only)
-    const canCopy = templateProjectId && org.login === templateProjectOrg;
-
-    if (canCopy) {
+    // 2. Try to copy from the org's template project
+    if (templateProjectId) {
       // Copy the template project — inherits all fields, views, and settings
       projectId = await copyProject(token, templateProjectId, orgId, repo.name);
       console.log(`Copied template project → ${projectId}`);
@@ -141,6 +166,278 @@ async function handleRepoCreated(payload, env) {
     console.log(`Setup complete for ${repo.full_name}!`);
   } catch (err) {
     console.error(`Failed to set up project for ${repo.full_name}:`, err);
+  }
+}
+
+// ─── Item Added Handler ──────────────────────────────────────────────────────
+
+async function handleItemAdded(payload, env) {
+  const projectNodeId = payload.projects_v2_item.project_node_id;
+  const itemNodeId = payload.projects_v2_item.node_id;
+  const templateName = env.DEFAULT_TEMPLATE || "ai-review";
+  const templatesRepo = env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates";
+
+  const installationId = payload.installation.id;
+  const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+
+  try {
+    // Fetch the template to get default rules
+    const template = await fetchTemplate(token, templatesRepo, templateName);
+    if (!template || !template.rules || !template.rules.default_status) return;
+
+    const defaultStatus = template.rules.default_status;
+
+    // Get the project's Status field and find the matching option
+    const fields = await getExistingFields(token, projectNodeId);
+    const statusField = fields.find((f) => f.name === "Status" && f.options);
+    if (!statusField) return;
+
+    const statusOption = statusField.options.find((o) => o.name === defaultStatus);
+    if (!statusOption) return;
+
+    // Check if Status is already set on this item
+    const itemData = await graphql(
+      token,
+      `query($itemId: ID!) {
+        node(id: $itemId) {
+          ... on ProjectV2Item {
+            fieldValueByName(name: "Status") {
+              ... on ProjectV2ItemFieldSingleSelectValue { name }
+            }
+          }
+        }
+      }`,
+      { itemId: itemNodeId }
+    );
+
+    const currentStatus = itemData.node?.fieldValueByName?.name;
+    if (currentStatus) return; // Already has a status, don't override
+
+    // Set default status
+    await graphql(
+      token,
+      `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: $projectId
+          itemId: $itemId
+          fieldId: $fieldId
+          value: { singleSelectOptionId: $optionId }
+        }) {
+          projectV2Item { id }
+        }
+      }`,
+      {
+        projectId: projectNodeId,
+        itemId: itemNodeId,
+        fieldId: statusField.id,
+        optionId: statusOption.id,
+      }
+    );
+
+    console.log(`Set default status '${defaultStatus}' on item ${itemNodeId}`);
+  } catch (err) {
+    // Don't log errors for items where status is already set or field doesn't exist
+    if (!err.message?.includes("could not resolve")) {
+      console.error(`Failed to set default status on item ${itemNodeId}:`, err);
+    }
+  }
+}
+
+// ─── Project Created Handler ─────────────────────────────────────────────────
+
+async function handleProjectCreated(payload, env) {
+  const projectNodeId = payload.projects_v2.node_id;
+  const org = payload.organization;
+  const templateProjects = JSON.parse(env.TEMPLATE_PROJECTS || "{}");
+  const templateName = env.DEFAULT_TEMPLATE || "ai-review";
+  const templatesRepo = env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates";
+
+  // Skip if this IS a template project (avoid syncing templates to themselves)
+  const templateProjectIds = Object.values(templateProjects);
+  if (templateProjectIds.includes(projectNodeId)) {
+    console.log(`Skipping template project ${projectNodeId}`);
+    return;
+  }
+
+  const installationId = payload.installation.id;
+  const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+
+  // Check if the project already has custom fields (Worker-created projects will)
+  const existingFields = await getExistingFields(token, projectNodeId);
+  const customFields = existingFields.filter((f) =>
+    f.dataType && !["TITLE", "ASSIGNEES", "LABELS", "LINKED_PULL_REQUESTS",
+      "MILESTONE", "REPOSITORY", "REVIEWERS", "PARENT_ISSUE",
+      "SUB_ISSUES_PROGRESS", "TRACKS"].includes(f.dataType)
+  );
+
+  // If it only has the default Status field (no other custom fields), apply template
+  const hasOnlyDefaultStatus = customFields.length <= 1 &&
+    customFields.every((f) => f.name === "Status");
+
+  if (!hasOnlyDefaultStatus) {
+    console.log(`Project ${projectNodeId} already has custom fields, skipping`);
+    return;
+  }
+
+  console.log(`New project ${projectNodeId} in ${org.login} — applying template...`);
+
+  try {
+    // Fetch and apply the template
+    const template = await fetchTemplate(token, templatesRepo, templateName);
+    if (!template) {
+      console.error(`Template '${templateName}' not found`);
+      return;
+    }
+
+    await syncFieldsToProject(token, projectNodeId, template);
+    console.log(`Applied '${templateName}' template to project ${projectNodeId}`);
+  } catch (err) {
+    console.error(`Failed to apply template to project ${projectNodeId}:`, err);
+  }
+}
+
+// ─── Template Sync Handler ───────────────────────────────────────────────────
+
+async function handleTemplateSyncPush(payload, env) {
+  const templatesRepo = env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates";
+  const templateProjects = JSON.parse(env.TEMPLATE_PROJECTS || "{}");
+
+  // Figure out which templates were modified
+  const changedTemplates = new Set();
+  for (const commit of payload.commits || []) {
+    for (const file of [...(commit.added || []), ...(commit.modified || [])]) {
+      const match = file.match(/^templates\/([^/]+)\/fields\.json$/);
+      if (match) changedTemplates.add(match[1]);
+    }
+  }
+
+  console.log(`Template sync triggered — changed templates: ${[...changedTemplates].join(", ")}`);
+
+  // Get a token for the templates repo (to fetch fields.json)
+  const sourceInstallationId = payload.installation.id;
+  const sourceToken = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, sourceInstallationId);
+
+  // Get all app installations (to find tokens for each org)
+  const installations = await listInstallations(env.APP_ID, env.PRIVATE_KEY);
+
+  for (const templateName of changedTemplates) {
+    // Fetch the updated template
+    const template = await fetchTemplate(sourceToken, templatesRepo, templateName);
+    if (!template) {
+      console.error(`Could not fetch template '${templateName}' after push`);
+      continue;
+    }
+
+    // Sync to each org's template project
+    for (const [orgLogin, projectId] of Object.entries(templateProjects)) {
+      console.log(`Syncing '${templateName}' → ${orgLogin} (${projectId})`);
+
+      try {
+        // Get installation token for this org
+        const installation = installations.find(
+          (i) => i.account.login.toLowerCase() === orgLogin.toLowerCase()
+        );
+        if (!installation) {
+          console.error(`No installation found for org '${orgLogin}', skipping`);
+          continue;
+        }
+
+        const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installation.id);
+
+        // Sync fields: update existing, create missing
+        await syncFieldsToProject(token, projectId, template);
+        console.log(`Synced '${templateName}' to ${orgLogin}`);
+      } catch (err) {
+        console.error(`Failed to sync '${templateName}' to ${orgLogin}:`, err);
+      }
+    }
+  }
+
+  console.log("Template sync complete!");
+}
+
+async function listInstallations(appId, privateKey) {
+  const jwt = await createJWT(appId, privateKey);
+  const resp = await fetch(`${GITHUB_API}/app/installations`, {
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "project-setup-bot",
+    },
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to list installations: ${resp.status}`);
+  }
+  return await resp.json();
+}
+
+async function syncFieldsToProject(token, projectId, template) {
+  const existingFields = await getExistingFields(token, projectId);
+
+  for (const field of template.fields) {
+    const existing = existingFields.find((f) => f.name === field.name);
+
+    if (existing && field.options) {
+      // Update options on existing field (builtin or custom single-select)
+      const optionsGql = field.options
+        .map((o) => {
+          const desc = o.description || "";
+          return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+        })
+        .join(", ");
+
+      await graphql(
+        token,
+        `mutation {
+          updateProjectV2Field(input: {
+            fieldId: "${existing.id}"
+            singleSelectOptions: [${optionsGql}]
+          }) {
+            projectV2Field { ... on ProjectV2SingleSelectField { id } }
+          }
+        }`
+      );
+      console.log(`  Updated: ${field.name}`);
+    } else if (!existing && !field.builtin) {
+      // Create new field
+      if (field.type === "SINGLE_SELECT" && field.options) {
+        const optionsGql = field.options
+          .map((o) => {
+            const desc = o.description || "";
+            return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+          })
+          .join(", ");
+
+        await graphql(
+          token,
+          `mutation {
+            createProjectV2Field(input: {
+              projectId: "${projectId}"
+              dataType: SINGLE_SELECT
+              name: "${escGql(field.name)}"
+              singleSelectOptions: [${optionsGql}]
+            }) {
+              projectV2Field { ... on ProjectV2SingleSelectField { id } }
+            }
+          }`
+        );
+        console.log(`  Created: ${field.name} (SINGLE_SELECT)`);
+      } else if (field.type === "NUMBER" || field.type === "TEXT") {
+        await graphql(
+          token,
+          `mutation {
+            createProjectV2Field(input: {
+              projectId: "${projectId}"
+              dataType: ${field.type}
+              name: "${escGql(field.name)}"
+            }) {
+              projectV2Field { ... on ProjectV2Field { id } }
+            }
+          }`
+        );
+        console.log(`  Created: ${field.name} (${field.type})`);
+      }
+    }
   }
 }
 
