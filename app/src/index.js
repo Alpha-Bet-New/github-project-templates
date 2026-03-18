@@ -13,6 +13,9 @@
  * On projects_v2_item.created (item added to project):
  *   Sets default Status to "Proposed" (per template rules) if no status is set
  *
+ * On issue_comment.created (comment with AI signature):
+ *   Parses "🤖 **Model** · Verdict" signature → updates reviewer field on project
+ *
  * On push to templates repo (fields.json changed):
  *   Syncs all template projects across orgs to match the updated fields.json
  *
@@ -69,6 +72,12 @@ export default {
     if (event === "projects_v2_item" && payload.action === "created") {
       // Item added to project → apply default field values
       ctx.waitUntil(handleItemAdded(payload, env));
+      return new Response("Accepted", { status: 202 });
+    }
+
+    if (event === "issue_comment" && payload.action === "created") {
+      // Comment on issue → check for AI review signature
+      ctx.waitUntil(handleIssueComment(payload, env));
       return new Response("Accepted", { status: 202 });
     }
 
@@ -166,6 +175,105 @@ async function handleRepoCreated(payload, env) {
     console.log(`Setup complete for ${repo.full_name}!`);
   } catch (err) {
     console.error(`Failed to set up project for ${repo.full_name}:`, err);
+  }
+}
+
+// ─── Issue Comment Handler ───────────────────────────────────────────────────
+
+// Signature format (at end of comment):
+//   ---
+//   🤖 **Claude** · Agreed
+//
+// Model must be: Claude, Gemini, or Codex
+// Verdict must be: Agreed, Mostly Agreed, or Disagree
+
+const SIGNATURE_REGEX = /🤖\s*\*{0,2}(Claude|Gemini|Codex)\*{0,2}\s*·\s*(Agreed|Mostly Agreed|Disagree)/i;
+
+async function handleIssueComment(payload, env) {
+  const comment = payload.comment;
+  const issue = payload.issue;
+  const repo = payload.repository;
+
+  // Parse signature from comment body
+  const match = comment.body.match(SIGNATURE_REGEX);
+  if (!match) return; // No AI signature, ignore
+
+  const modelName = match[1]; // Claude, Gemini, or Codex
+  const verdict = match[2];   // Agreed, Mostly Agreed, or Disagree
+
+  // Normalize model name (capitalize first letter)
+  const model = modelName.charAt(0).toUpperCase() + modelName.slice(1).toLowerCase();
+  const reviewerField = `${model} Reviewer`;
+
+  console.log(`AI review: ${model} → ${verdict} on ${repo.full_name}#${issue.number}`);
+
+  try {
+    const installationId = payload.installation.id;
+    const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+
+    // Find the issue's project item(s)
+    const issueNodeId = issue.node_id;
+    const projectItems = await graphql(
+      token,
+      `query($id: ID!) {
+        node(id: $id) {
+          ... on Issue {
+            projectItems(first: 10) {
+              nodes {
+                id
+                project { id }
+              }
+            }
+          }
+        }
+      }`,
+      { id: issueNodeId }
+    );
+
+    const items = projectItems.node?.projectItems?.nodes || [];
+    if (items.length === 0) {
+      console.log(`Issue #${issue.number} is not in any project, skipping`);
+      return;
+    }
+
+    for (const item of items) {
+      const projectId = item.project.id;
+      const itemId = item.id;
+
+      // Get the reviewer field and find the matching option
+      const fields = await getExistingFields(token, projectId);
+      const field = fields.find((f) => f.name === reviewerField && f.options);
+      if (!field) {
+        console.log(`Field '${reviewerField}' not found in project ${projectId}`);
+        continue;
+      }
+
+      const option = field.options.find((o) => o.name === verdict);
+      if (!option) {
+        console.log(`Option '${verdict}' not found in field '${reviewerField}'`);
+        continue;
+      }
+
+      // Update the reviewer field
+      await graphql(
+        token,
+        `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+          updateProjectV2ItemFieldValue(input: {
+            projectId: $projectId
+            itemId: $itemId
+            fieldId: $fieldId
+            value: { singleSelectOptionId: $optionId }
+          }) {
+            projectV2Item { id }
+          }
+        }`,
+        { projectId, itemId, fieldId: field.id, optionId: option.id }
+      );
+
+      console.log(`Set ${reviewerField} → ${verdict} on item ${itemId}`);
+    }
+  } catch (err) {
+    console.error(`Failed to process review comment on ${repo.full_name}#${issue.number}:`, err);
   }
 }
 
