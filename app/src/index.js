@@ -126,6 +126,49 @@ async function handleRepoCreated(payload, env) {
 
 // ─── GitHub App Authentication ───────────────────────────────────────────────
 
+/**
+ * Wrap a PKCS#1 RSA private key DER in a PKCS#8 envelope.
+ * PKCS#8 = SEQUENCE { AlgorithmIdentifier, OCTET STRING(PKCS#1 key) }
+ */
+function wrapPkcs1ToPkcs8(pkcs1Der) {
+  // RSA OID: 1.2.840.113549.1.1.1 + NULL params
+  const rsaOid = new Uint8Array([
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+  ]);
+
+  // Wrap PKCS#1 key in OCTET STRING
+  const octetString = asn1Wrap(0x04, pkcs1Der);
+
+  // Version INTEGER 0
+  const version = new Uint8Array([0x02, 0x01, 0x00]);
+
+  // Outer SEQUENCE
+  const inner = new Uint8Array(version.length + rsaOid.length + octetString.length);
+  inner.set(version, 0);
+  inner.set(rsaOid, version.length);
+  inner.set(octetString, version.length + rsaOid.length);
+
+  return asn1Wrap(0x30, inner);
+}
+
+function asn1Wrap(tag, data) {
+  const len = data.length;
+  let header;
+  if (len < 128) {
+    header = new Uint8Array([tag, len]);
+  } else if (len < 256) {
+    header = new Uint8Array([tag, 0x81, len]);
+  } else if (len < 65536) {
+    header = new Uint8Array([tag, 0x82, (len >> 8) & 0xff, len & 0xff]);
+  } else {
+    header = new Uint8Array([tag, 0x83, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff]);
+  }
+  const result = new Uint8Array(header.length + data.length);
+  result.set(header, 0);
+  result.set(data, header.length);
+  return result;
+}
+
 async function createJWT(appId, privateKeyPem) {
   const now = Math.floor(Date.now() / 1000);
   const payload = {
@@ -134,12 +177,16 @@ async function createJWT(appId, privateKeyPem) {
     iss: appId,
   };
 
-  // Parse PEM to DER
+  // Parse PEM to DER — GitHub generates PKCS#1 keys, Web Crypto needs PKCS#8
   const pemBody = privateKeyPem
-    .replace(/-----BEGIN RSA PRIVATE KEY-----/, "")
-    .replace(/-----END RSA PRIVATE KEY-----/, "")
-    .replace(/\n/g, "");
-  const der = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/, "")
+    .replace(/-----END (?:RSA )?PRIVATE KEY-----/, "")
+    .replace(/[\n\r\s]/g, "");
+  const pkcs1Der = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+
+  // Wrap PKCS#1 in PKCS#8 envelope if needed
+  const isPkcs1 = privateKeyPem.includes("BEGIN RSA PRIVATE KEY");
+  const der = isPkcs1 ? wrapPkcs1ToPkcs8(pkcs1Der) : pkcs1Der;
 
   const key = await crypto.subtle.importKey(
     "pkcs8",
