@@ -37,7 +37,7 @@
       "options": [
         { "name": "Claude", "color": "ORANGE", "description": "Anthropic Claude" },
         { "name": "Gemini", "color": "BLUE", "description": "Google Gemini" },
-        { "name": "Codex", "color": "GREEN", "description": "OpenAI Codex" }
+        { "name": "Codex", "color": "GREEN", "description": "OpenAI Codex"  }
       ]
     },
     {
