@@ -35,9 +35,9 @@
       "type": "SINGLE_SELECT",
       "description": "Which AI model originally found/proposed the issue. Set once at creation, never changed.",
       "options": [
-        { "name": "Claude", "color": "ORANGE" },
-        { "name": "Gemini", "color": "BLUE" },
-        { "name": "Codex", "color": "GREEN" }
+        { "name": "Claude", "color": "ORANGE", "description": "Anthropic Claude" },
+        { "name": "Gemini", "color": "BLUE", "description": "Google Gemini" },
+        { "name": "Codex", "color": "GREEN", "description": "OpenAI Codex" }
       ]
     },
     {
