@@ -35,9 +35,21 @@
       "type": "SINGLE_SELECT",
       "description": "Which AI model originally found/proposed the issue. Set once at creation, never changed.",
       "options": [
-        { "name": "Claude", "color": "ORANGE", "description": "Anthropic Claude" },
-        { "name": "Gemini", "color": "BLUE", "description": "Google Gemini" },
-        { "name": "Codex", "color": "GREEN", "description": "OpenAI Codex"  }
+        {
+          "name": "Claude",
+          "color": "ORANGE",
+          "description": "Anthropic Claude"
+        },
+        {
+          "name": "Gemini",
+          "color": "BLUE",
+          "description": "Google Gemini"
+        },
+        {
+          "name": "Codex",
+          "color": "GREEN",
+          "description": "OpenAI Codex"
+        }
       ]
     },
     {
@@ -58,7 +70,7 @@
         {
           "name": "Spec Deviation",
           "color": "YELLOW",
-          "description": "Code differs from spec but neither is necessarily wrong — needs human review."
+          "description": "Code differs from spec but neither is necessarily wrong \u2014 needs human review."
         },
         {
           "name": "Doc Fix",
@@ -99,9 +111,21 @@
       "type": "SINGLE_SELECT",
       "description": "Gemini's assessment of another model's issue. Left blank for Gemini-authored issues.",
       "options": [
-        { "name": "Agreed", "color": "GREEN", "description": "Fully agrees." },
-        { "name": "Mostly Agreed", "color": "YELLOW", "description": "Agrees with reservations." },
-        { "name": "Disagree", "color": "RED", "description": "Does not agree." }
+        {
+          "name": "Agreed",
+          "color": "GREEN",
+          "description": "Fully agrees."
+        },
+        {
+          "name": "Mostly Agreed",
+          "color": "YELLOW",
+          "description": "Agrees with reservations."
+        },
+        {
+          "name": "Disagree",
+          "color": "RED",
+          "description": "Does not agree."
+        }
       ]
     },
     {
@@ -109,15 +133,27 @@
       "type": "SINGLE_SELECT",
       "description": "Codex's assessment of another model's issue. Left blank for Codex-authored issues.",
       "options": [
-        { "name": "Agreed", "color": "GREEN", "description": "Fully agrees." },
-        { "name": "Mostly Agreed", "color": "YELLOW", "description": "Agrees with reservations." },
-        { "name": "Disagree", "color": "RED", "description": "Does not agree." }
+        {
+          "name": "Agreed",
+          "color": "GREEN",
+          "description": "Fully agrees."
+        },
+        {
+          "name": "Mostly Agreed",
+          "color": "YELLOW",
+          "description": "Agrees with reservations."
+        },
+        {
+          "name": "Disagree",
+          "color": "RED",
+          "description": "Does not agree."
+        }
       ]
     }
   ],
   "rules": {
     "default_status": "Proposed",
     "reviewer_self_review": false,
-    "issue_body_requirements": "Include full code snippets, line numbers, mathematical explanations, and impact analysis — enough for another AI model to independently evaluate the claim."
+    "issue_body_requirements": "Include full code snippets, line numbers, mathematical explanations, and impact analysis \u2014 enough for another AI model to independently evaluate the claim."
   }
 }
