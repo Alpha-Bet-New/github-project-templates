@@ -1,0 +1,123 @@
+{
+  "template": "ai-review",
+  "description": "Multi-model AI review workflow. AI models propose issues, cross-review each other's findings, and track confidence levels. Designed for code audits, framework reviews, and spec validation.",
+  "fields": [
+    {
+      "name": "Status",
+      "type": "SINGLE_SELECT",
+      "builtin": true,
+      "description": "Standard workflow status. All AI-generated issues start at Proposed.",
+      "options": [
+        {
+          "name": "Proposed",
+          "color": "GRAY",
+          "description": "Suggested by a model but not yet approved by a human for work."
+        },
+        {
+          "name": "Todo",
+          "color": "BLUE",
+          "description": "Approved by a human and queued for implementation."
+        },
+        {
+          "name": "In Progress",
+          "color": "YELLOW",
+          "description": "Actively being worked on."
+        },
+        {
+          "name": "Done",
+          "color": "GREEN",
+          "description": "Fix has been implemented and verified."
+        }
+      ]
+    },
+    {
+      "name": "Model",
+      "type": "SINGLE_SELECT",
+      "description": "Which AI model originally found/proposed the issue. Set once at creation, never changed.",
+      "options": [
+        { "name": "Claude", "color": "ORANGE" },
+        { "name": "Gemini", "color": "BLUE" },
+        { "name": "Codex", "color": "GREEN" }
+      ]
+    },
+    {
+      "name": "Issue Type",
+      "type": "SINGLE_SELECT",
+      "description": "Classifies the nature of the problem found.",
+      "options": [
+        {
+          "name": "Code Bug",
+          "color": "RED",
+          "description": "Code error that would crash or produce clearly wrong behavior at runtime."
+        },
+        {
+          "name": "Math Bug",
+          "color": "ORANGE",
+          "description": "Formula or mathematical error that silently produces wrong numerical results without crashing."
+        },
+        {
+          "name": "Spec Deviation",
+          "color": "YELLOW",
+          "description": "Code differs from spec but neither is necessarily wrong — needs human review."
+        },
+        {
+          "name": "Doc Fix",
+          "color": "BLUE",
+          "description": "Wording, naming, or clarity issue in the document. Codebase is fine."
+        }
+      ]
+    },
+    {
+      "name": "Confidence Level",
+      "type": "NUMBER",
+      "description": "Proposing model's self-assessed confidence (1-10). 9-10: objectively verifiable. 7-8: strong evidence. 5-6: debatable. 3-4: mild concern. 1-2: cosmetic."
+    },
+    {
+      "name": "Claude Reviewer",
+      "type": "SINGLE_SELECT",
+      "description": "Claude's assessment of another model's issue. Left blank for Claude-authored issues.",
+      "options": [
+        {
+          "name": "Agreed",
+          "color": "GREEN",
+          "description": "Fully agrees the issue is valid and proposed fix is correct."
+        },
+        {
+          "name": "Mostly Agreed",
+          "color": "YELLOW",
+          "description": "Agrees issue exists but has reservations. Should leave a comment."
+        },
+        {
+          "name": "Disagree",
+          "color": "RED",
+          "description": "Does not believe issue is valid. Should leave a comment with reasoning."
+        }
+      ]
+    },
+    {
+      "name": "Gemini Reviewer",
+      "type": "SINGLE_SELECT",
+      "description": "Gemini's assessment of another model's issue. Left blank for Gemini-authored issues.",
+      "options": [
+        { "name": "Agreed", "color": "GREEN", "description": "Fully agrees." },
+        { "name": "Mostly Agreed", "color": "YELLOW", "description": "Agrees with reservations." },
+        { "name": "Disagree", "color": "RED", "description": "Does not agree." }
+      ]
+    },
+    {
+      "name": "Codex Reviewer",
+      "type": "SINGLE_SELECT",
+      "description": "Codex's assessment of another model's issue. Left blank for Codex-authored issues.",
+      "options": [
+        { "name": "Agreed", "color": "GREEN", "description": "Fully agrees." },
+        { "name": "Mostly Agreed", "color": "YELLOW", "description": "Agrees with reservations." },
+        { "name": "Disagree", "color": "RED", "description": "Does not agree." }
+      ]
+    }
+  ],
+  "rules": {
+    "default_status": "Proposed",
+    "reviewer_self_review": false,
+    "issue_body_requirements": "Include full code snippets, line numbers, mathematical explanations, and impact analysis — enough for another AI model to independently evaluate the claim."
+  }
+}
