@@ -2,17 +2,19 @@
  * GitHub App webhook handler — Cloudflare Worker
  *
  * On repository.created:
- *   1. Creates a GitHub Project V2 with the same name as the repo
+ *   1. Copies a GitHub Project V2 from a template project (same org), OR
+ *      creates a new project + fields from JSON template (cross-org fallback)
  *   2. Links the project to the repo
- *   3. Creates all custom fields from the template
- *   4. Pushes project-fields.json + docs to the repo's .github/ directory
+ *   3. Pushes project-fields.json + docs to the repo's .github/ directory
  *
  * Environment variables (set as Cloudflare Worker secrets):
- *   APP_ID            — GitHub App ID
- *   PRIVATE_KEY       — GitHub App private key (PEM format)
- *   WEBHOOK_SECRET    — Webhook secret for signature verification
- *   DEFAULT_TEMPLATE  — Template name (default: "ai-review")
- *   TEMPLATES_REPO    — Owner/repo for templates (default: "Alpha-Bet-New/github-project-templates")
+ *   APP_ID              — GitHub App ID
+ *   PRIVATE_KEY         — GitHub App private key (PEM format)
+ *   WEBHOOK_SECRET      — Webhook secret for signature verification
+ *   DEFAULT_TEMPLATE    — Template name (default: "ai-review")
+ *   TEMPLATES_REPO      — Owner/repo for templates (default: "Alpha-Bet-New/github-project-templates")
+ *   TEMPLATE_PROJECT_ID — Node ID of the template project to copy from
+ *   TEMPLATE_PROJECT_ORG — Org that owns the template project (copy only works same-org)
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -66,6 +68,8 @@ async function handleRepoCreated(payload, env) {
   const org = payload.organization;
   const templateName = env.DEFAULT_TEMPLATE || "ai-review";
   const templatesRepo = env.TEMPLATES_REPO || "Alpha-Bet-New/github-project-templates";
+  const templateProjectId = env.TEMPLATE_PROJECT_ID || "";
+  const templateProjectOrg = env.TEMPLATE_PROJECT_ORG || "";
 
   console.log(`New repo: ${repo.full_name} — setting up project...`);
 
@@ -74,47 +78,63 @@ async function handleRepoCreated(payload, env) {
     const installationId = payload.installation.id;
     const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
 
-    // 2. Fetch the template from the templates repo
-    const template = await fetchTemplate(token, templatesRepo, templateName);
-    if (!template) {
-      console.error(`Template '${templateName}' not found in ${templatesRepo}`);
-      return;
+    const orgId = await getOrgNodeId(token, org.login);
+    const repoNodeId = repo.node_id;
+    let projectId;
+    let generatedFields;
+
+    // 2. Try to copy from template project (same org only)
+    const canCopy = templateProjectId && org.login === templateProjectOrg;
+
+    if (canCopy) {
+      // Copy the template project — inherits all fields, views, and settings
+      projectId = await copyProject(token, templateProjectId, orgId, repo.name);
+      console.log(`Copied template project → ${projectId}`);
+
+      // Link project to the repo
+      await linkProjectToRepo(token, projectId, repoNodeId);
+      console.log(`Linked project to ${repo.full_name}`);
+
+      // Query the copied project's fields to build the generated IDs
+      generatedFields = await queryProjectFields(token, projectId);
+      console.log(`Mapped ${Object.keys(generatedFields).length} fields from copied project`);
+    } else {
+      // Cross-org fallback: create project + fields from JSON template
+      console.log(`Cross-org or no template project — creating fields from JSON...`);
+
+      const template = await fetchTemplate(token, templatesRepo, templateName);
+      if (!template) {
+        console.error(`Template '${templateName}' not found in ${templatesRepo}`);
+        return;
+      }
+
+      projectId = await createProject(token, orgId, repo.name);
+      console.log(`Created project: ${projectId}`);
+
+      await linkProjectToRepo(token, projectId, repoNodeId);
+      console.log(`Linked project to ${repo.full_name}`);
+
+      generatedFields = await createFields(token, projectId, template);
+      console.log(`Created ${Object.keys(generatedFields).length} fields`);
     }
 
-    // 3. Get the org's node ID
-    const orgId = await getOrgNodeId(token, org.login);
-
-    // 4. Create the project
-    const projectId = await createProject(token, orgId, repo.name);
-    console.log(`Created project: ${projectId}`);
-
-    // 5. Link project to the repo
-    const repoNodeId = repo.node_id;
-    await linkProjectToRepo(token, projectId, repoNodeId);
-    console.log(`Linked project to ${repo.full_name}`);
-
-    // 6. Create all custom fields from the template
-    const generatedFields = await createFields(token, projectId, template);
-    console.log(`Created ${Object.keys(generatedFields).length} fields`);
-
-    // 7. Build the generated IDs JSON
-    const projectTitle = repo.name;
+    // 3. Build the generated IDs JSON
     const generatedIds = {
       project_id: projectId,
-      project_title: projectTitle,
+      project_title: repo.name,
       template: templateName,
       fields: generatedFields,
     };
 
-    // 8. Fetch the template README for docs
+    // 4. Fetch the template README for docs
     const templateReadme = await fetchTemplateFile(token, templatesRepo, templateName, "README.md");
-    const templateFieldsJson = JSON.stringify(template, null, 2);
+    const templateFieldsJson = await fetchTemplateFile(token, templatesRepo, templateName, "fields.json");
 
-    // 9. Push config files to the new repo
+    // 5. Push config files to the new repo
     await pushConfigFiles(token, repo.full_name, repo.default_branch, {
       ".github/project-fields.json": JSON.stringify(generatedIds, null, 2),
-      ".github/project-template.json": templateFieldsJson,
-      ".github/PROJECT_FIELDS.md": templateReadme || `# ${projectTitle} — Project Fields\n\nSee project-fields.json for field IDs.\n`,
+      ".github/project-template.json": templateFieldsJson || "{}",
+      ".github/PROJECT_FIELDS.md": templateReadme || `# ${repo.name} — Project Fields\n\nSee project-fields.json for field IDs.\n`,
     });
     console.log(`Pushed config files to ${repo.full_name}/.github/`);
 
@@ -300,6 +320,44 @@ async function linkProjectToRepo(token, projectId, repositoryId) {
     }`,
     { projectId, repositoryId }
   );
+}
+
+// ─── Copy Project from Template ──────────────────────────────────────────────
+
+async function copyProject(token, sourceProjectId, ownerId, title) {
+  const data = await graphql(
+    token,
+    `mutation($projectId: ID!, $ownerId: ID!, $title: String!) {
+      copyProjectV2(input: { projectId: $projectId, ownerId: $ownerId, title: $title, includeDraftIssues: false }) {
+        projectV2 { id }
+      }
+    }`,
+    { projectId: sourceProjectId, ownerId, title }
+  );
+  return data.copyProjectV2.projectV2.id;
+}
+
+async function queryProjectFields(token, projectId) {
+  const fields = await getExistingFields(token, projectId);
+  const result = {};
+
+  for (const field of fields) {
+    // Skip built-in fields that aren't useful (Title, Assignees, Labels, etc.)
+    // but include Status and any custom fields
+    if (!field.dataType) continue;
+
+    const entry = { id: field.id };
+    if (field.options && field.options.length > 0) {
+      const optMap = {};
+      for (const opt of field.options) {
+        optMap[opt.name] = opt.id;
+      }
+      entry.options = optMap;
+    }
+    result[field.name] = entry;
+  }
+
+  return result;
 }
 
 // ─── Field Creation ──────────────────────────────────────────────────────────

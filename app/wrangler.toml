@@ -11,3 +11,5 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 DEFAULT_TEMPLATE = "ai-review"
 TEMPLATES_REPO = "Alpha-Bet-New/github-project-templates"
+TEMPLATE_PROJECT_ID = "PVT_kwDOCx99fM4BSGlz"      # FV2.0 — source template project to copy
+TEMPLATE_PROJECT_ORG = "Alpha-Bet-New"              # Org that owns the template project
