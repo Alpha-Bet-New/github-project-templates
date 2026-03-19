@@ -13,6 +13,9 @@
  * On projects_v2_item.created (item added to project):
  *   Sets default Status to "Proposed" (per template rules) if no status is set
  *
+ * On projects_v2_item.edited (field value changed manually):
+ *   If a reviewer field changed, recomputes Consensus and auto-promotes Status
+ *
  * On issue_comment.created (comment with AI signature):
  *   Parses "🤖 **Model** · Verdict" signature → updates reviewer field on project
  *
@@ -72,6 +75,12 @@ export default {
     if (event === "projects_v2_item" && payload.action === "created") {
       // Item added to project → apply default field values
       ctx.waitUntil(handleItemAdded(payload, env));
+      return new Response("Accepted", { status: 202 });
+    }
+
+    if (event === "projects_v2_item" && payload.action === "edited") {
+      // Field value manually changed → recompute consensus if reviewer field
+      ctx.waitUntil(handleItemEdited(payload, env));
       return new Response("Accepted", { status: 202 });
     }
 
@@ -304,13 +313,16 @@ async function updateConsensus(token, projectId, itemId, fields) {
   ];
 
   const hasDisagree = reviews.some((r) => r === "Disagree");
-  const allReviewed = reviews.filter((r) => r !== null).length === 3;
+  const allReviewed = reviews.every((r) => r !== null);
+  const allAgreed = reviews.every((r) => r === "Agreed");
 
   let consensus = null; // null = leave blank / clear
   if (hasDisagree) {
     consensus = "No";
-  } else if (allReviewed) {
+  } else if (allAgreed) {
     consensus = "Yes";
+  } else if (allReviewed) {
+    consensus = "Partial";
   }
 
   // Find the Consensus field
@@ -337,44 +349,61 @@ async function updateConsensus(token, projectId, itemId, fields) {
     );
     console.log(`Consensus → ${consensus}`);
 
-    // Auto-promote Status: Proposed → Todo when consensus is Yes
-    if (consensus === "Yes") {
-      const statusField = fields.find((f) => f.name === "Status" && f.options);
-      if (statusField) {
-        // Check current status
-        const statusData = await graphql(
-          token,
-          `query($itemId: ID!) {
-            node(id: $itemId) {
-              ... on ProjectV2Item {
-                fieldValueByName(name: "Status") {
-                  ... on ProjectV2ItemFieldSingleSelectValue { name }
-                }
+    // Auto-update Status based on consensus
+    const statusField = fields.find((f) => f.name === "Status" && f.options);
+    if (statusField) {
+      const statusData = await graphql(
+        token,
+        `query($itemId: ID!) {
+          node(id: $itemId) {
+            ... on ProjectV2Item {
+              fieldValueByName(name: "Status") {
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
               }
             }
-          }`,
-          { itemId }
-        );
-        const currentStatus = statusData.node?.fieldValueByName?.name;
-        if (currentStatus === "Proposed") {
-          const todoOption = statusField.options.find((o) => o.name === "Todo");
-          if (todoOption) {
-            await graphql(
-              token,
-              `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $projectId
-                  itemId: $itemId
-                  fieldId: $fieldId
-                  value: { singleSelectOptionId: $optionId }
-                }) {
-                  projectV2Item { id }
-                }
-              }`,
-              { projectId, itemId, fieldId: statusField.id, optionId: todoOption.id }
-            );
-            console.log(`Status: Proposed → Todo (consensus reached)`);
           }
+        }`,
+        { itemId }
+      );
+      const currentStatus = statusData.node?.fieldValueByName?.name || null;
+
+      if (consensus === "Yes" && (!currentStatus || currentStatus === "Proposed")) {
+        const todoOption = statusField.options.find((o) => o.name === "Todo");
+        if (todoOption) {
+          await graphql(
+            token,
+            `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }`,
+            { projectId, itemId, fieldId: statusField.id, optionId: todoOption.id }
+          );
+          console.log(`Status: ${currentStatus || "(blank)"} → Todo (consensus Yes)`);
+        }
+      } else if ((consensus === "Partial" || consensus === "No") && currentStatus === "Todo") {
+        const proposedOption = statusField.options.find((o) => o.name === "Proposed");
+        if (proposedOption) {
+          await graphql(
+            token,
+            `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }`,
+            { projectId, itemId, fieldId: statusField.id, optionId: proposedOption.id }
+          );
+          console.log(`Status: Todo → Proposed (consensus ${consensus})`);
         }
       }
     }
@@ -467,6 +496,34 @@ async function handleItemAdded(payload, env) {
     if (!err.message?.includes("could not resolve")) {
       console.error(`Failed to set default status on item ${itemNodeId}:`, err);
     }
+  }
+}
+
+// ─── Item Edited Handler (manual field changes) ─────────────────────────────
+
+const REVIEWER_FIELDS = new Set(["Claude Reviewer", "Gemini Reviewer", "Codex Reviewer"]);
+
+async function handleItemEdited(payload, env) {
+  const projectNodeId = payload.projects_v2_item.project_node_id;
+  const itemNodeId = payload.projects_v2_item.node_id;
+
+  // The payload includes changes.field_value.field_node_id — the field that changed
+  const changedFieldId = payload.changes?.field_value?.field_node_id;
+  if (!changedFieldId) return;
+
+  const installationId = payload.installation.id;
+  const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+
+  try {
+    // Look up the field name to check if it's a reviewer field
+    const fields = await getExistingFields(token, projectNodeId);
+    const changedField = fields.find((f) => f.id === changedFieldId);
+    if (!changedField || !REVIEWER_FIELDS.has(changedField.name)) return;
+
+    console.log(`Manual edit: ${changedField.name} changed on item ${itemNodeId} — recomputing consensus`);
+    await updateConsensus(token, projectNodeId, itemNodeId, fields);
+  } catch (err) {
+    console.error(`Failed to handle item edit on ${itemNodeId}:`, err);
   }
 }
 

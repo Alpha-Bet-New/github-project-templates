@@ -153,12 +153,17 @@
     {
       "name": "Consensus",
       "type": "SINGLE_SELECT",
-      "description": "Auto-computed. Yes if all reviewers agree (or mostly agree). No if any reviewer disagrees. Blank until enough reviews are in.",
+      "description": "Auto-computed. Yes if all 3 fully Agree. Partial if all reviewed but some Mostly Agreed. No if any Disagree. Blank until all reviewed.",
       "options": [
         {
           "name": "Yes",
           "color": "GREEN",
-          "description": "All reviewers agree the issue is valid."
+          "description": "All 3 reviewers fully Agreed."
+        },
+        {
+          "name": "Partial",
+          "color": "YELLOW",
+          "description": "All reviewed, no Disagree, but not all fully Agreed (some Mostly Agreed)."
         },
         {
           "name": "No",
