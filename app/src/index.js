@@ -605,11 +605,13 @@ async function syncFieldsToProject(token, projectId, template) {
     const existing = existingFields.find((f) => f.name === field.name);
 
     if (existing && field.options) {
-      // Update options on existing field (builtin or custom single-select)
+      // Update options on existing field — preserve existing option IDs to avoid wiping values
       const optionsGql = field.options
         .map((o) => {
           const desc = o.description || "";
-          return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+          const existingOpt = (existing.options || []).find((eo) => eo.name === o.name);
+          const idPart = existingOpt ? `id: "${existingOpt.id}", ` : "";
+          return `{ ${idPart}name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
         })
         .join(", ");
 
@@ -925,7 +927,9 @@ async function createFields(token, projectId, template) {
         const optionsGql = field.options
           .map((o) => {
             const desc = o.description || "";
-            return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+            const existingOpt = (existing.options || []).find((eo) => eo.name === o.name);
+            const idPart = existingOpt ? `id: "${existingOpt.id}", ` : "";
+            return `{ ${idPart}name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
           })
           .join(", ");
 

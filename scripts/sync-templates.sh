@@ -65,8 +65,15 @@ for ORG in $ORGS; do
     EXISTING_ID=$(echo "$EXISTING" | jq -r ".[] | select(.name == \"$FIELD_NAME\") | .id // empty")
 
     if [ "$IS_BUILTIN" = "true" ] && [ -n "$EXISTING_ID" ] && [ "$HAS_OPTIONS" -gt 0 ]; then
-      # Update builtin field options
-      OPTIONS_GQL=$(jq -r "[.fields[$i].options[] | \"{ name: \\\"\" + .name + \"\\\", color: \" + .color + \", description: \\\"\" + (.description // \"\") + \"\\\" }\"] | join(\", \")" "$TEMPLATE_FILE")
+      # Update builtin field options — preserve existing option IDs
+      EXISTING_OPTIONS=$(echo "$EXISTING" | jq -c "[.[] | select(.name == \"$FIELD_NAME\") | .options // [] | .[]] | flatten")
+      OPTIONS_GQL=$(jq -r --argjson existing "$EXISTING_OPTIONS" '
+        [.fields['"$i"'].options[] |
+          . as $o |
+          ($existing | map(select(.name == $o.name)) | first | .id // "") as $eid |
+          "{ " + (if $eid != "" then "id: \"" + $eid + "\", " else "" end) +
+          "name: \"" + .name + "\", color: " + .color + ", description: \"" + (.description // "") + "\" }"
+        ] | join(", ")' "$TEMPLATE_FILE")
 
       gh api graphql -f query="
         mutation {
@@ -116,8 +123,15 @@ for ORG in $ORGS; do
       SYNCED=$((SYNCED + 1))
 
     elif [ -n "$EXISTING_ID" ] && [ "$FIELD_TYPE" = "SINGLE_SELECT" ] && [ "$HAS_OPTIONS" -gt 0 ]; then
-      # Update existing custom field options
-      OPTIONS_GQL=$(jq -r "[.fields[$i].options[] | \"{ name: \\\"\" + .name + \"\\\", color: \" + .color + \", description: \\\"\" + (.description // \"\") + \"\\\" }\"] | join(\", \")" "$TEMPLATE_FILE")
+      # Update existing custom field options — preserve existing option IDs
+      EXISTING_OPTIONS=$(echo "$EXISTING" | jq -c "[.[] | select(.name == \"$FIELD_NAME\") | .options // [] | .[]] | flatten")
+      OPTIONS_GQL=$(jq -r --argjson existing "$EXISTING_OPTIONS" '
+        [.fields['"$i"'].options[] |
+          . as $o |
+          ($existing | map(select(.name == $o.name)) | first | .id // "") as $eid |
+          "{ " + (if $eid != "" then "id: \"" + $eid + "\", " else "" end) +
+          "name: \"" + .name + "\", color: " + .color + ", description: \"" + (.description // "") + "\" }"
+        ] | join(", ")' "$TEMPLATE_FILE")
 
       gh api graphql -f query="
         mutation {
