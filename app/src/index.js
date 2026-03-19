@@ -16,6 +16,9 @@
  * On projects_v2_item.edited (field value changed manually):
  *   If a reviewer field changed, recomputes Consensus and auto-promotes Status
  *
+ * On issues.opened (new issue with YAML metadata):
+ *   Parses <!-- issue-agent --> YAML block, adds issue to project, sets Model/Type/Confidence
+ *
  * On issue_comment.created (comment with AI signature):
  *   Parses "🤖 **Model** · Verdict" signature → updates reviewer field on project
  *
@@ -81,6 +84,12 @@ export default {
     if (event === "projects_v2_item" && payload.action === "edited") {
       // Field value manually changed → recompute consensus if reviewer field
       ctx.waitUntil(handleItemEdited(payload, env));
+      return new Response("Accepted", { status: 202 });
+    }
+
+    if (event === "issues" && payload.action === "opened") {
+      // New issue → parse YAML metadata and set project fields
+      ctx.waitUntil(handleIssueOpened(payload, env));
       return new Response("Accepted", { status: 202 });
     }
 
@@ -185,6 +194,200 @@ async function handleRepoCreated(payload, env) {
   } catch (err) {
     console.error(`Failed to set up project for ${repo.full_name}:`, err);
   }
+}
+
+// ─── Issue Opened Handler (YAML metadata parsing) ──────────────────────────
+
+function parseIssueAgentYaml(body) {
+  const match = body.match(/<!--\s*issue-agent\n([\s\S]*?)-->/);
+  if (!match) return null;
+
+  const yaml = match[1];
+  const result = {};
+
+  for (const line of yaml.split("\n")) {
+    const kvMatch = line.match(/^(\w[\w_]*)\s*:\s*(.+)$/);
+    if (kvMatch) {
+      const key = kvMatch[1].trim();
+      let value = kvMatch[2].trim();
+      if (/^\d+$/.test(value)) value = parseInt(value, 10);
+      result[key] = value;
+    }
+  }
+
+  // Parse related_issues array: [6, 12]
+  const relatedMatch = yaml.match(/related_issues:\s*\[([^\]]*)\]/);
+  if (relatedMatch) {
+    result.related_issues = relatedMatch[1]
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n));
+  }
+
+  return result;
+}
+
+async function handleIssueOpened(payload, env) {
+  const issue = payload.issue;
+  const repo = payload.repository;
+
+  // Parse YAML metadata from issue body
+  const metadata = parseIssueAgentYaml(issue.body || "");
+  if (!metadata) return; // No issue-agent metadata, skip
+
+  console.log(`Issue Agent: Processing #${issue.number} in ${repo.full_name}`);
+
+  const installationId = payload.installation.id;
+  const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+
+  try {
+    // Find the project for this repo by checking linked projects
+    const templateProjects = JSON.parse(env.TEMPLATE_PROJECTS || "{}");
+    const org = payload.organization?.login || repo.owner.login;
+    const projectId = templateProjects[org];
+
+    if (!projectId) {
+      // Try to find project from repo's project-fields.json
+      const configContent = await fetchRepoFile(token, repo.full_name, ".github/project-fields.json");
+      if (!configContent) {
+        console.log(`No project found for ${repo.full_name}, skipping`);
+        return;
+      }
+      const config = JSON.parse(configContent);
+      if (!config.project_id) return;
+      await processIssueMetadata(token, config.project_id, issue, metadata);
+    } else {
+      // Use the org's project — but first find the specific repo project
+      // Check if the issue is already in a project, or find one linked to this repo
+      const repoProjects = await graphql(
+        token,
+        `query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            projectsV2(first: 5) {
+              nodes { id title }
+            }
+          }
+        }`,
+        { owner: repo.owner.login, name: repo.name }
+      );
+
+      const projects = repoProjects.repository?.projectsV2?.nodes || [];
+      if (projects.length === 0) {
+        console.log(`No projects linked to ${repo.full_name}, skipping`);
+        return;
+      }
+
+      // Use the first linked project
+      await processIssueMetadata(token, projects[0].id, issue, metadata);
+    }
+  } catch (err) {
+    console.error(`Failed to process issue #${issue.number} in ${repo.full_name}:`, err);
+  }
+}
+
+async function processIssueMetadata(token, projectId, issue, metadata) {
+  // Add issue to project
+  let itemId;
+  try {
+    const addResult = await graphql(
+      token,
+      `mutation($projectId: ID!, $contentId: ID!) {
+        addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+          item { id }
+        }
+      }`,
+      { projectId, contentId: issue.node_id }
+    );
+    itemId = addResult.addProjectV2ItemById.item.id;
+  } catch (e) {
+    // May already be in project — find it
+    const items = await graphql(
+      token,
+      `query($id: ID!) {
+        node(id: $id) {
+          ... on Issue {
+            projectItems(first: 10) {
+              nodes { id project { id } }
+            }
+          }
+        }
+      }`,
+      { id: issue.node_id }
+    );
+    const match = items.node?.projectItems?.nodes?.find((i) => i.project.id === projectId);
+    if (!match) {
+      console.log(`Could not add issue #${issue.number} to project`);
+      return;
+    }
+    itemId = match.id;
+  }
+
+  console.log(`Issue #${issue.number} → project item ${itemId}`);
+
+  // Get fields dynamically (avoids stale cached IDs)
+  const fields = await getExistingFields(token, projectId);
+
+  // Set Model
+  if (metadata.model) {
+    const field = fields.find((f) => f.name === "Model" && f.options);
+    if (field) {
+      const option = field.options.find((o) => o.name === metadata.model);
+      if (option) {
+        await graphql(
+          token,
+          `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+              value: { singleSelectOptionId: $optionId }
+            }) { projectV2Item { id } }
+          }`,
+          { projectId, itemId, fieldId: field.id, optionId: option.id }
+        );
+        console.log(`Set Model → ${metadata.model}`);
+      }
+    }
+  }
+
+  // Set Issue Type
+  if (metadata.issue_type) {
+    const field = fields.find((f) => f.name === "Issue Type" && f.options);
+    if (field) {
+      const option = field.options.find((o) => o.name === metadata.issue_type);
+      if (option) {
+        await graphql(
+          token,
+          `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+              value: { singleSelectOptionId: $optionId }
+            }) { projectV2Item { id } }
+          }`,
+          { projectId, itemId, fieldId: field.id, optionId: option.id }
+        );
+        console.log(`Set Issue Type → ${metadata.issue_type}`);
+      }
+    }
+  }
+
+  // Set Confidence Level
+  if (metadata.confidence) {
+    const field = fields.find((f) => f.name === "Confidence Level");
+    if (field) {
+      await graphql(
+        token,
+        `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
+          updateProjectV2ItemFieldValue(input: {
+            projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+            value: { number: $value }
+          }) { projectV2Item { id } }
+        }`,
+        { projectId, itemId, fieldId: field.id, value: parseFloat(metadata.confidence) }
+      );
+      console.log(`Set Confidence Level → ${metadata.confidence}`);
+    }
+  }
+
+  console.log(`Issue Agent: Completed field setup for #${issue.number}`);
 }
 
 // ─── Issue Comment Handler ───────────────────────────────────────────────────
@@ -1083,6 +1286,19 @@ async function fetchTemplate(token, templatesRepo, templateName) {
 
 async function fetchTemplateFile(token, templatesRepo, templateName, fileName) {
   const url = `${GITHUB_API}/repos/${templatesRepo}/contents/templates/${templateName}/${fileName}`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github.raw+json",
+      "User-Agent": "project-setup-bot",
+    },
+  });
+  if (!resp.ok) return null;
+  return await resp.text();
+}
+
+async function fetchRepoFile(token, repoFullName, filePath) {
+  const url = `${GITHUB_API}/repos/${repoFullName}/contents/${filePath}`;
   const resp = await fetch(url, {
     headers: {
       Authorization: `Bearer ${token}`,
