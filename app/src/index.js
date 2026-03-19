@@ -605,28 +605,36 @@ async function syncFieldsToProject(token, projectId, template) {
     const existing = existingFields.find((f) => f.name === field.name);
 
     if (existing && field.options) {
-      // Update options on existing field — preserve existing option IDs to avoid wiping values
-      const optionsGql = field.options
-        .map((o) => {
-          const desc = o.description || "";
-          const existingOpt = (existing.options || []).find((eo) => eo.name === o.name);
-          const idPart = existingOpt ? `id: "${existingOpt.id}", ` : "";
-          return `{ ${idPart}name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
-        })
-        .join(", ");
+      // Only update if options actually changed — avoids regenerating option IDs
+      // which would wipe existing item values
+      const existingNames = (existing.options || []).map((o) => o.name).sort();
+      const templateNames = field.options.map((o) => o.name).sort();
+      const namesMatch = existingNames.length === templateNames.length &&
+        existingNames.every((n, i) => n === templateNames[i]);
 
-      await graphql(
-        token,
-        `mutation {
-          updateProjectV2Field(input: {
-            fieldId: "${existing.id}"
-            singleSelectOptions: [${optionsGql}]
-          }) {
-            projectV2Field { ... on ProjectV2SingleSelectField { id } }
-          }
-        }`
-      );
-      console.log(`  Updated: ${field.name}`);
+      if (namesMatch) {
+        console.log(`  Skipped: ${field.name} (options unchanged)`);
+      } else {
+        const optionsGql = field.options
+          .map((o) => {
+            const desc = o.description || "";
+            return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+          })
+          .join(", ");
+
+        await graphql(
+          token,
+          `mutation {
+            updateProjectV2Field(input: {
+              fieldId: "${existing.id}"
+              singleSelectOptions: [${optionsGql}]
+            }) {
+              projectV2Field { ... on ProjectV2SingleSelectField { id } }
+            }
+          }`
+        );
+        console.log(`  Updated: ${field.name}`);
+      }
     } else if (!existing && !field.builtin) {
       // Create new field
       if (field.type === "SINGLE_SELECT" && field.options) {
@@ -927,9 +935,7 @@ async function createFields(token, projectId, template) {
         const optionsGql = field.options
           .map((o) => {
             const desc = o.description || "";
-            const existingOpt = (existing.options || []).find((eo) => eo.name === o.name);
-            const idPart = existingOpt ? `id: "${existingOpt.id}", ` : "";
-            return `{ ${idPart}name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
+            return `{ name: "${escGql(o.name)}", color: ${o.color}, description: "${escGql(desc)}" }`;
           })
           .join(", ");
 
