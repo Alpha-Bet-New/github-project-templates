@@ -22,6 +22,13 @@
  * On issue_comment.created (comment with AI signature):
  *   Parses "🤖 **Model** · Verdict" signature → updates reviewer field on project
  *
+ * On issue_comment.created (user feedback keywords):
+ *   "disagree"/"reject" → adds needs-review label
+ *   "approve"/"lgtm" → removes needs-review label
+ *   "priority: must/should/could" → updates priority label
+ *   "split this/into" → adds needs-split label
+ *   "blocked/blocked by" → adds blocked label
+ *
  * On push to templates repo (fields.json changed):
  *   Syncs all template projects across orgs to match the updated fields.json
  *
@@ -406,6 +413,67 @@ async function handleIssueComment(payload, env) {
   const issue = payload.issue;
   const repo = payload.repository;
 
+  // --- User feedback patterns (keyword-based label automation) ---
+  const commentLower = comment.body.toLowerCase().trim();
+  const installationId = payload.installation.id;
+
+  // Only process user feedback if it's NOT from a bot
+  if (!comment.user.type || comment.user.type !== "Bot") {
+    let handled = false;
+
+    try {
+      const token = await getInstallationToken(env.APP_ID, env.PRIVATE_KEY, installationId);
+      const repoFullName = repo.full_name;
+      const issueNum = issue.number;
+
+      // Disagree / reject → add needs-review label
+      if (commentLower.includes("disagree") || commentLower.includes("reject")) {
+        await addLabelToIssue(token, repoFullName, issueNum, "needs-review");
+        console.log(`User feedback: disagreed on ${repoFullName}#${issueNum} → added needs-review`);
+        handled = true;
+      }
+
+      // Approve / lgtm → remove needs-review label
+      if (commentLower.includes("approve") || commentLower.includes("lgtm")) {
+        await removeLabelFromIssue(token, repoFullName, issueNum, "needs-review");
+        console.log(`User feedback: approved ${repoFullName}#${issueNum} → removed needs-review`);
+        handled = true;
+      }
+
+      // Priority change: "priority: must" / "priority: should" / "priority: could"
+      const priorityMatch = commentLower.match(/priority:\s*(must|should|could)/);
+      if (priorityMatch) {
+        const newPriority = priorityMatch[1];
+        // Remove existing priority labels
+        for (const p of ["priority: must", "priority: should", "priority: could"]) {
+          await removeLabelFromIssue(token, repoFullName, issueNum, p).catch(() => {});
+        }
+        await addLabelToIssue(token, repoFullName, issueNum, `priority: ${newPriority}`);
+        console.log(`User feedback: priority → ${newPriority} on ${repoFullName}#${issueNum}`);
+        handled = true;
+      }
+
+      // Split request → add needs-split label
+      if (commentLower.includes("split this") || commentLower.includes("split into")) {
+        await addLabelToIssue(token, repoFullName, issueNum, "needs-split");
+        console.log(`User feedback: split requested on ${repoFullName}#${issueNum}`);
+        handled = true;
+      }
+
+      // Block → add blocked label
+      if (commentLower.match(/\bblocked?\b/) || commentLower.includes("blocked by")) {
+        await addLabelToIssue(token, repoFullName, issueNum, "blocked");
+        console.log(`User feedback: blocked on ${repoFullName}#${issueNum}`);
+        handled = true;
+      }
+
+      if (handled) return; // User feedback processed, skip AI signature check
+    } catch (err) {
+      console.error(`Failed to process user feedback on ${repo.full_name}#${issue.number}:`, err);
+    }
+  }
+
+  // --- AI review signature processing ---
   // Parse signature from comment body
   const match = comment.body.match(SIGNATURE_REGEX);
   if (!match) return; // No AI signature, ignore
@@ -1046,6 +1114,51 @@ async function getInstallationToken(appId, privateKey, installationId) {
 
   const data = await resp.json();
   return data.token;
+}
+
+// ─── Issue Label Helpers ─────────────────────────────────────────────────────
+
+async function addLabelToIssue(token, repoFullName, issueNumber, label) {
+  // Ensure the label exists first (create if not)
+  const [owner, repo] = repoFullName.split("/");
+  await fetch(`${GITHUB_API}/repos/${owner}/${repo}/labels`, {
+    method: "POST",
+    headers: {
+      Authorization: `token ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: label, color: "ededed" }),
+  }).catch(() => {}); // Ignore if label already exists (422)
+
+  const resp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/issues/${issueNumber}/labels`, {
+    method: "POST",
+    headers: {
+      Authorization: `token ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ labels: [label] }),
+  });
+  if (!resp.ok && resp.status !== 422) {
+    throw new Error(`Failed to add label '${label}': ${resp.status}`);
+  }
+}
+
+async function removeLabelFromIssue(token, repoFullName, issueNumber, label) {
+  const [owner, repo] = repoFullName.split("/");
+  const encodedLabel = encodeURIComponent(label);
+  const resp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodedLabel}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `token ${token}`,
+      Accept: "application/vnd.github+json",
+    },
+  });
+  // 404 is fine — label wasn't on the issue
+  if (!resp.ok && resp.status !== 404) {
+    throw new Error(`Failed to remove label '${label}': ${resp.status}`);
+  }
 }
 
 // ─── Webhook Signature Verification ──────────────────────────────────────────
