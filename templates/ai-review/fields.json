@@ -55,8 +55,28 @@
     {
       "name": "Issue Type",
       "type": "SINGLE_SELECT",
-      "description": "Classifies the nature of the problem found.",
+      "description": "Classifies the nature of the work item.",
       "options": [
+        {
+          "name": "Requirement",
+          "color": "PURPLE",
+          "description": "Feature or capability defined during PRD. Represents a user-facing deliverable."
+        },
+        {
+          "name": "Enhancement",
+          "color": "BLUE",
+          "description": "Improvement to existing functionality. Not a new feature, not a bug fix."
+        },
+        {
+          "name": "Bug",
+          "color": "RED",
+          "description": "Runtime defect — code crashes, produces wrong results, or behaves incorrectly."
+        },
+        {
+          "name": "Task",
+          "color": "GRAY",
+          "description": "Implementation work that isn't a feature or fix (setup, refactoring, CI, docs)."
+        },
         {
           "name": "Code Bug",
           "color": "RED",
