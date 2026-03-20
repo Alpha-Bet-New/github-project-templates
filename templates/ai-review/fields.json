@@ -173,6 +173,26 @@
       ]
     }
   ],
+  "views_manual": {
+    "_note": "GitHub API does not support view configuration. These define the intended view setup — must be applied manually in the UI after project creation.",
+    "Overview": {
+      "layout": "TABLE",
+      "visibleFields": [
+        "Title",
+        "Status",
+        "Model",
+        "Issue Type",
+        "Confidence Level",
+        "Consensus",
+        "Claude Reviewer",
+        "Gemini Reviewer",
+        "Codex Reviewer",
+        "Labels",
+        "Milestone",
+        "Assignees"
+      ]
+    }
+  },
   "rules": {
     "default_status": "Proposed",
     "reviewer_self_review": false,
